@@ -1,0 +1,21 @@
+[project]
+name = "omniguard"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datadog-api-client>=2.46.0",
+    "ddtrace>=4.0.0",
+    "fastapi>=0.122.0",
+    "google-cloud-aiplatform>=1.128.0",
+    "httpx>=0.28.1",
+    "opentelemetry-exporter-otlp>=1.38.0",
+    "opentelemetry-instrumentation>=0.59b0",
+    "opentelemetry-sdk>=1.38.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+    "uvicorn[standard]>=0.38.0",
+]
