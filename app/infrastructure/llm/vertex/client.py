@@ -1,24 +1,36 @@
 import time
 import uuid
-from typing import Generator, Iterable, Dict, Any
+from typing import Generator, Iterable, Dict, Any, List
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig, Content, Part
+from vertexai.language_models import TextEmbeddingModel
 
 from app.infrastructure.config.settings import get_settings
 from app.api.schemas.llm import ChatRequest, ChatResponse, UsageInfo
 
-# # Datadog LLMObs
+# Datadog LLMObs
 from ddtrace.llmobs import LLMObs
 
+# Optional MiniLM embeddings via sentence-transformers
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None  # type: ignore[assignment]
+
+
 class VertexLLMClient:
-    # # Thin wrapper around Vertex AI GenerativeModel for Gemini
+    # # Thin wrapper around Vertex AI GenerativeModel and TextEmbeddingModel for Gemini
     def __init__(self) -> None:
         self._settings = get_settings()
         self._initialized = False
         self._model: GenerativeModel | None = None
 
+        self._embedding_model: TextEmbeddingModel | None = None
+        self._minilm_model: Any | None = None
+
     def _init_client(self) -> None:
+        # # Lazily initialize Vertex AI generative client
         if self._initialized:
             return
 
@@ -29,7 +41,26 @@ class VertexLLMClient:
         self._model = GenerativeModel(self._settings.vertex_model_name)
         self._initialized = True
 
+    def _init_embedding_clients(self) -> None:
+        # # Lazily initialize Vertex text embeddings and MiniLM sentence encoder
+        if self._embedding_model is None:
+            try:
+                self._embedding_model = TextEmbeddingModel.from_pretrained(
+                    "textembedding-gecko@latest"
+                )
+            except Exception:
+                self._embedding_model = None
+
+        if self._minilm_model is None and SentenceTransformer is not None:
+            try:
+                self._minilm_model = SentenceTransformer(
+                    "sentence-transformers/all-MiniLM-L6-v2"
+                )
+            except Exception:
+                self._minilm_model = None
+
     def _build_generation_config(self, req: ChatRequest) -> GenerationConfig:
+        # # Map ChatRequest sampling parameters to Vertex generation config
         return GenerationConfig(
             max_output_tokens=req.max_output_tokens,
             temperature=req.temperature,
@@ -37,6 +68,7 @@ class VertexLLMClient:
         )
 
     def _convert_messages_to_vertex_content(self, req: ChatRequest) -> Iterable[Content]:
+        # # Convert OmniGuard chat messages to Vertex AI Content objects
         contents: list[Content] = []
         for msg in req.messages:
             part = Part.from_text(msg.content)
@@ -48,7 +80,46 @@ class VertexLLMClient:
             )
         return contents
 
+    def get_hybrid_embeddings_for_text(
+        self,
+        text: str,
+    ) -> tuple[List[float], List[float]]:
+        # # Compute Vertex and MiniLM embeddings for the same text
+        self._init_embedding_clients()
+
+        vertex_vec: List[float] = []
+        minilm_vec: List[float] = []
+
+        if self._embedding_model is not None and text:
+            try:
+                embeddings = self._embedding_model.get_embeddings([text])
+                if embeddings:
+                    emb = embeddings[0]
+                    if hasattr(emb, "values"):
+                        values = getattr(emb, "values") or []
+                        vertex_vec = [float(x) for x in values]
+                    elif isinstance(emb, dict) and "values" in emb:
+                        values = emb["values"] or []
+                        vertex_vec = [float(x) for x in values]
+                    elif isinstance(emb, (list, tuple)):
+                        vertex_vec = [float(x) for x in emb]
+            except Exception:
+                vertex_vec = []
+
+        if self._minilm_model is not None and text:
+            try:
+                encoded = self._minilm_model.encode(text)
+                if hasattr(encoded, "tolist"):
+                    minilm_vec = [float(x) for x in encoded.tolist()]
+                else:
+                    minilm_vec = [float(x) for x in encoded]
+            except Exception:
+                minilm_vec = []
+
+        return vertex_vec, minilm_vec
+
     def generate_chat(self, req: ChatRequest) -> ChatResponse:
+        # # Execute a non-streaming chat completion via Gemini on Vertex AI
         self._init_client()
         assert self._model is not None
 
@@ -69,7 +140,7 @@ class VertexLLMClient:
 
         output_text = response.text if hasattr(response, "text") else ""
 
-        # # Emit final output to Datadog metrics
+        # # Emit core metrics into the LLMObs span
         LLMObs.annotate(
             metadata={
                 "latency_ms": latency_ms,
@@ -92,9 +163,10 @@ class VertexLLMClient:
         return chat_response
 
     def generate_chat_stream(
-        self, req: ChatRequest
+        self,
+        req: ChatRequest,
     ) -> Generator[Dict[str, Any], None, None]:
-
+        # # Execute a streaming chat completion and yield JSON compatible fragments
         self._init_client()
         assert self._model is not None
 
@@ -126,7 +198,7 @@ class VertexLLMClient:
         latency_ms = (end - start) * 1000.0
         full_text = "".join(total_text_parts)
 
-        # # Annotate final streaming output
+        # # Annotate final streaming output in LLMObs span
         LLMObs.annotate(
             output_data=full_text,
             metadata={
@@ -147,6 +219,7 @@ class VertexLLMClient:
         }
 
     def _extract_usage(self, response: Any) -> UsageInfo:
+        # # Extract token usage from Vertex response object
         usage = getattr(response, "usage_metadata", None)
         if usage is None:
             return UsageInfo()
@@ -165,6 +238,7 @@ class VertexLLMClient:
         )
 
     def _extract_raw_metadata(self, response: Any) -> Dict[str, Any]:
+        # # Extract raw metadata snapshot from Vertex response for diagnostics
         metadata: Dict[str, Any] = {}
         usage = getattr(response, "usage_metadata", None)
         if usage is not None:
@@ -180,5 +254,6 @@ class VertexLLMClient:
 
     @staticmethod
     def _now_utc():
+        # # Return current UTC time with timezone information
         from datetime import datetime, timezone
         return datetime.now(timezone.utc)
