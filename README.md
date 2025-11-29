@@ -1,4 +1,3 @@
-````markdown
 # OmniGuard LLM Service
 
 A FastAPI-based backend service for interacting with Google's Vertex AI LLMs (Gemini) and integrated observability via Datadog. Designed for observability-first applications with latency, drift, and token usage monitoring.
