@@ -30,12 +30,15 @@ A FastAPI-based backend service for interacting with Google's Vertex AI LLMs (Ge
 ## Installation
 
 ```bash
-# Create virtual environment
-python -m venv .venv
+# Install uv (if not already installed)
+curl -Ls https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment using uv
+uv venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 
-# Install dependencies
-pip install -r requirements.txt
+# Install Python dependencies
+uv pip install -r requirements.txt
 ````
 
 ---
