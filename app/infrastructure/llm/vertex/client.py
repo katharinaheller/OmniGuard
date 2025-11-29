@@ -8,6 +8,8 @@ from vertexai.generative_models import GenerativeModel, GenerationConfig, Conten
 from app.infrastructure.config.settings import get_settings
 from app.api.schemas.llm import ChatRequest, ChatResponse, UsageInfo
 
+# # Datadog LLMObs
+from ddtrace.llmobs import LLMObs
 
 class VertexLLMClient:
     # # Thin wrapper around Vertex AI GenerativeModel for Gemini
@@ -17,7 +19,6 @@ class VertexLLMClient:
         self._model: GenerativeModel | None = None
 
     def _init_client(self) -> None:
-        # # Lazy initialization of the Vertex AI client and model
         if self._initialized:
             return
 
@@ -29,7 +30,6 @@ class VertexLLMClient:
         self._initialized = True
 
     def _build_generation_config(self, req: ChatRequest) -> GenerationConfig:
-        # # Map request level parameters to Vertex generation config
         return GenerationConfig(
             max_output_tokens=req.max_output_tokens,
             temperature=req.temperature,
@@ -37,7 +37,6 @@ class VertexLLMClient:
         )
 
     def _convert_messages_to_vertex_content(self, req: ChatRequest) -> Iterable[Content]:
-        # # Transform generic ChatRequest messages into Vertex Content objects
         contents: list[Content] = []
         for msg in req.messages:
             part = Part.from_text(msg.content)
@@ -50,7 +49,6 @@ class VertexLLMClient:
         return contents
 
     def generate_chat(self, req: ChatRequest) -> ChatResponse:
-        # # Non-streaming call that returns a fully assembled ChatResponse
         self._init_client()
         assert self._model is not None
 
@@ -71,6 +69,16 @@ class VertexLLMClient:
 
         output_text = response.text if hasattr(response, "text") else ""
 
+        # # Emit final output to Datadog metrics
+        LLMObs.annotate(
+            metadata={
+                "latency_ms": latency_ms,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            }
+        )
+
         chat_response = ChatResponse(
             id=str(uuid.uuid4()),
             model=self._settings.vertex_model_name,
@@ -86,7 +94,7 @@ class VertexLLMClient:
     def generate_chat_stream(
         self, req: ChatRequest
     ) -> Generator[Dict[str, Any], None, None]:
-        # # Streaming call that yields partial chunks suitable for SSE or chunked HTTP
+
         self._init_client()
         assert self._model is not None
 
@@ -105,25 +113,29 @@ class VertexLLMClient:
         final_usage = UsageInfo()
 
         for chunk in stream:
-            # # Extract incremental text for this chunk
             text_fragment = getattr(chunk, "text", "") or ""
             if text_fragment:
                 total_text_parts.append(text_fragment)
+                yield {"type": "chunk", "text": text_fragment}
 
-                yield {
-                    "type": "chunk",
-                    "text": text_fragment,
-                }
-
-            # # Update usage from chunk if available
             usage = self._extract_usage(chunk)
             if usage.total_tokens > 0:
                 final_usage = usage
 
         end = time.perf_counter()
         latency_ms = (end - start) * 1000.0
-
         full_text = "".join(total_text_parts)
+
+        # # Annotate final streaming output
+        LLMObs.annotate(
+            output_data=full_text,
+            metadata={
+                "latency_ms": latency_ms,
+                "input_tokens": final_usage.input_tokens,
+                "output_tokens": final_usage.output_tokens,
+                "total_tokens": final_usage.total_tokens,
+            },
+        )
 
         yield {
             "type": "final",
@@ -135,7 +147,6 @@ class VertexLLMClient:
         }
 
     def _extract_usage(self, response: Any) -> UsageInfo:
-        # # Extract token usage if available on the response
         usage = getattr(response, "usage_metadata", None)
         if usage is None:
             return UsageInfo()
@@ -146,18 +157,14 @@ class VertexLLMClient:
             input_tokens + output_tokens
         )
 
-        # # Placeholder: you can compute a real cost based on pricing tables here
-        estimated_cost_usd = 0.0
-
         return UsageInfo(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            estimated_cost_usd=estimated_cost_usd,
+            estimated_cost_usd=0.0,
         )
 
     def _extract_raw_metadata(self, response: Any) -> Dict[str, Any]:
-        # # Extract raw metadata for observability and debugging
         metadata: Dict[str, Any] = {}
         usage = getattr(response, "usage_metadata", None)
         if usage is not None:
@@ -166,17 +173,12 @@ class VertexLLMClient:
                 "output_token_count": getattr(usage, "output_token_count", None),
                 "total_token_count": getattr(usage, "total_token_count", None),
             }
-
-        # # You can add safety ratings or citations if the model returns them
         safety_ratings = getattr(response, "safety_ratings", None)
         if safety_ratings is not None:
             metadata["safety_ratings"] = [str(r) for r in safety_ratings]
-
         return metadata
 
     @staticmethod
     def _now_utc():
-        # # Use datetime in a local helper to avoid global import cycles
         from datetime import datetime, timezone
-
         return datetime.now(timezone.utc)
