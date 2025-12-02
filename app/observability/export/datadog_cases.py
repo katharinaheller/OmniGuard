@@ -1,22 +1,26 @@
 import os
 import json
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 
 class CaseGenerator:
-    # Agentless Case Management (Datadog API v2)
+    # Case Management for Datadog API v2
     def __init__(self) -> None:
         self.api_key = os.getenv("DD_API_KEY")
-        self.app_key = os.getenv("DD_APP_KEY")  # REQUIRED
+        self.app_key = os.getenv("DD_APP_KEY")
         self.site = os.getenv("DD_SITE", "datadoghq.eu")
+        self.user_id = os.getenv("DD_CASE_USER_ID")  # # Required by Datadog API
 
         if not self.api_key:
             raise RuntimeError("DD_API_KEY is required for CaseGenerator")
 
         if not self.app_key:
+            raise RuntimeError("DD_APP_KEY is required for CaseGenerator")
+
+        if not self.user_id:
             raise RuntimeError(
-                "DD_APP_KEY is required for CaseGenerator (401 Unauthorized if missing)"
+                "DD_CASE_USER_ID is required. Must be a Datadog user handle or user ID."
             )
 
         self.host = f"https://api.{self.site}"
@@ -28,6 +32,24 @@ class CaseGenerator:
             "Content-Type": "application/json",
         }
 
+        # Allowed severity values per Datadog API
+        self.allowed_severity = {"critical", "high", "medium", "low"}
+
+
+    def _build_tags(self, session_id: Optional[str], extra: Optional[Dict[str, Any]]) -> List[str]:
+        tags = ["source:omniguard"]
+
+        if session_id:
+            tags.append(f"session:{session_id}")
+
+        if extra:
+            for key, value in extra.items():
+                sval = str(value).strip().replace(" ", "_").lower()
+                tags.append(f"{key}:{sval}")
+
+        return tags
+
+
     def create_case(
         self,
         title: str,
@@ -37,32 +59,52 @@ class CaseGenerator:
         extra_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
 
-        tags = ["source:omniguard"]
-        if session_id:
-            tags.append(f"session:{session_id}")
-        if extra_context:
-            for k, v in extra_context.items():
-                tags.append(f"{k}:{v}")
+        if severity not in self.allowed_severity:
+            raise ValueError(
+                f"Invalid severity '{severity}'. Must be one of {sorted(self.allowed_severity)}"
+            )
 
+        tags = self._build_tags(session_id, extra_context)
+
+        # # Datadog JSON:API-compliant payload
         body = {
             "data": {
-                "type": "cases",
+                "type": "case",
                 "attributes": {
                     "title": title,
                     "description": description,
                     "severity": severity,
                     "tags": tags,
                 },
+                "relationships": {
+                    "modified_by": {
+                        "data": {
+                            "type": "users",
+                            "id": self.user_id,  # # REQUIRED by Datadog API
+                        }
+                    }
+                }
             }
         }
 
-        resp = requests.post(self.url, headers=self.headers, data=json.dumps(body), timeout=5)
+        resp = requests.post(
+            self.url,
+            headers=self.headers,
+            data=json.dumps(body),
+            timeout=5
+        )
+
         if resp.status_code == 401:
-            raise RuntimeError("Datadog Case API returned 401 Unauthorized – check DD_APP_KEY")
+            raise RuntimeError("Datadog Case API returned 401 Unauthorized – invalid DD_APP_KEY")
+
+        if resp.status_code == 403:
+            raise RuntimeError("Datadog Case API returned 403 Forbidden – insufficient permissions")
+
         if resp.status_code >= 300:
             raise RuntimeError(f"[CaseGenerator] {resp.status_code}: {resp.text}")
 
         return resp.json()
+
 
     def create_llm_drift_case(self, session_id: str, drift_score: float, threshold: float):
         return self.create_case(
@@ -72,6 +114,7 @@ class CaseGenerator:
             session_id=session_id,
             extra_context={"drift_score": drift_score},
         )
+
 
     def create_latency_case(self, session_id: str, latency_ms: float, threshold: float):
         return self.create_case(

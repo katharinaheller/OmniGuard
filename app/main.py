@@ -1,49 +1,68 @@
+# Load environment variables before anything else
+from dotenv import load_dotenv  # # Import dotenv loader
+load_dotenv()  # # Ensure Datadog keys are present at import time
+
+# Datadog auto-instrumentation for ddtrace v4.x (must be before any framework imports)
+from ddtrace import patch_all  # # Auto-instrument all supported libraries
+patch_all()  # # Enable all integrations in the current process
+
 from fastapi import FastAPI
 from app.api.routers import chat as chat_router
 from app.infrastructure.config.settings import get_settings
 
-# Load .env early (works with ddtrace-run because python loads file before instrumentation)
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
 
-# Datadog LLMObs
+# Datadog LLM Observability (agentless mode)
 from ddtrace.llmobs import LLMObs
 
-# Observability logger for JSON logs and Datadog ingestion
+# Structured JSON logger integration
 from app.observability.ingestion import configure_observability_logger
 
 
+def _validate_env() -> None:
+    # # Ensure required Datadog keys for agentless ingestion
+    required = ["DD_API_KEY"]
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variables for Datadog LLMObs: {missing}. "
+            "Check that .env is present and load_dotenv() executed."
+        )
+
+
+def _ensure_ml_app(settings) -> str:
+    # # Ensure ML application name exists for Datadog correlation
+    ml_app = os.getenv("DD_LLMOBS_ML_APP")
+    if ml_app:
+        return ml_app
+
+    # # Fallback to safe normalized name
+    fallback = settings.app_name.replace(" ", "_").lower()
+    os.environ["DD_LLMOBS_ML_APP"] = fallback
+    return fallback
+
+
 def create_app() -> FastAPI:
-    # Create config instance
     settings = get_settings()
+    _validate_env()
 
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
     )
 
-    # ---------------------------------------------------------------------
-    # Datadog Observability
-    # ---------------------------------------------------------------------
     @app.on_event("startup")
-    async def enable_llmobs() -> None:
-        # Initialize JSON log formatter + DD trace correlation
+    async def startup_observability() -> None:
+        # # Configure JSON logging + Datadog trace correlation
         configure_observability_logger()
 
-        # Ensure DD_LLMOBS_ML_APP is set, otherwise Datadog crashes
-        ml_app = os.getenv("DD_LLMOBS_ML_APP")
-        if not ml_app:
-            ml_app = settings.app_name.replace(" ", "_").lower()
-            os.environ["DD_LLMOBS_ML_APP"] = ml_app  # Safe fallback
+        # # Determine ML application identifier
+        ml_app = _ensure_ml_app(settings)
 
-        # Enable LLM Observability with autodetected ml_app
+        # # Enable Datadog LLM Observability (agentless)
         LLMObs.enable(ml_app=ml_app)
 
-    # ---------------------------------------------------------------------
-    # Routers
-    # ---------------------------------------------------------------------
+    # # Attach routers
     app.include_router(chat_router.router)
 
     @app.get("/health", tags=["health"])
@@ -57,4 +76,5 @@ def create_app() -> FastAPI:
     return app
 
 
+# # ASGI application instance
 app = create_app()
