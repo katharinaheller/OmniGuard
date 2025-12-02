@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any, Iterable, List, Optional
 
-from app.observability.export import MetricSender
+from app.infrastructure.telemetry.metrics.datadog_metrics import MetricSender
 
 # Global placeholder; avoids import-time API key requirement
 _METRICS: Optional[MetricSender] = None

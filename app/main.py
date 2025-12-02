@@ -15,8 +15,10 @@ import os
 # Datadog LLM Observability (agentless mode)
 from ddtrace.llmobs import LLMObs
 
-# Structured JSON logger integration
-from app.observability.ingestion import configure_observability_logger
+# Correct telemetry logger import (NEW LOCATION)
+from app.infrastructure.telemetry.logging.log_collector import (
+    configure_observability_logger
+)
 
 
 def _validate_env() -> None:

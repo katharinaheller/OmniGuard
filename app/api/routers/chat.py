@@ -1,3 +1,4 @@
+# Chat Router with fully SOLID dependency-injected orchestrator
 from typing import Any, Dict, Generator
 from uuid import uuid4
 
@@ -7,22 +8,26 @@ from fastapi.responses import StreamingResponse
 from app.api.schemas.llm import ChatRequest, ChatResponse
 from app.application.orchestrators.llm_orchestrator import LLMOrchestrator
 
-# Datadog LLMObs decorators
+# Dependency Injection factory
+from app.infrastructure.factories.orchestrator_factory import build_llm_orchestrator
+
+# Datadog LLMObs workflow decorator
 from ddtrace.llmobs.decorators import workflow
 
-# Observability log helper
-from app.observability.ingestion import log_event
+# Correct telemetry event logger
+from app.infrastructure.telemetry.logging.log_collector import log_event
+
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
 
 def get_llm_orchestrator() -> LLMOrchestrator:
-    # # Dependency injection factory for orchestrator
-    return LLMOrchestrator()
+    # Dependency-injected orchestrator with full SOLID wiring
+    return build_llm_orchestrator()
 
 
 def _ensure_session_id(req: ChatRequest) -> str:
-    # # Ensure that the request metadata contains a stable session_id
+    # Ensures each request has a persistent session_id
     if req.metadata is None:
         req.metadata = {}
     session_id_raw = req.metadata.get("session_id")
@@ -33,15 +38,13 @@ def _ensure_session_id(req: ChatRequest) -> str:
 
 
 @router.post("", response_model=ChatResponse)
-@workflow()  # # Create workflow root span for Datadog LLMObs
+@workflow()  # Datadog workflow root span
 async def chat_endpoint(
     req: ChatRequest,
     orchestrator: LLMOrchestrator = Depends(get_llm_orchestrator),
 ) -> ChatResponse:
-    # # Attach or create session_id for observability and correlation
     session_id = _ensure_session_id(req)
 
-    # # High level request log correlated with current span
     log_event(
         event_type="chat_request",
         message="Received non-streaming chat request",
@@ -53,7 +56,6 @@ async def chat_endpoint(
 
     response = orchestrator.handle_chat(req)
 
-    # # High level response log with latency and usage
     log_event(
         event_type="chat_response",
         message="Completed non-streaming chat request",
@@ -72,18 +74,16 @@ async def chat_endpoint(
 
 
 @router.post("/stream")
-@workflow()  # # Workflow span also for streaming endpoint
+@workflow()  # Datadog workflow span for streaming mode
 async def chat_stream_endpoint(
     req: ChatRequest,
     orchestrator: LLMOrchestrator = Depends(get_llm_orchestrator),
 ) -> StreamingResponse:
-    # # Attach or create session_id for streaming observability
     session_id = _ensure_session_id(req)
 
     from ddtrace.llmobs import LLMObs
     LLMObs.annotate(input_data=req.model_dump())
 
-    # # Log that streaming response is starting
     log_event(
         event_type="chat_stream_request",
         message="Received streaming chat request",
@@ -91,7 +91,7 @@ async def chat_stream_endpoint(
     )
 
     def event_generator() -> Generator[bytes, None, None]:
-        # # Stream JSON lines and allow orchestrator and client to add telemetry
+        # Streams JSON lines produced by orchestrator
         for event in orchestrator.handle_chat_stream(req):
             import json
             payload = json.dumps(event, ensure_ascii=False)
